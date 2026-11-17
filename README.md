@@ -29,7 +29,7 @@ docker compose up -d --build --wait
 
 - **蜂场箱位**：Hive含唯一code、site、queen_present、colony_frames、care_state。001–040东坡，041–080林缘。80格矩阵为编号箱位示意，不是地理坐标。主管编辑箱况；处置中禁止直接改王况/框数。
 - **巡箱手记**：Visit保留体重、箱温、活动、余饲、巡检见王与框数。新的巡检同步当前Hive王况/框数。已有处置时不能另记巡检替换原始输入；记录不提供PUT覆盖。
-- **弱群筛查**：每箱仅筛最新Visit，使用无标签IsolationForest异常分值；所有原始数值留在数据库。异常低分只提示核查，未见王无论是否异常都进入关注。
+- **弱群筛查**：每箱仅筛最新Visit，使用无标签IsolationForest异常分值；所有原始数值留在数据库。异常低分只提示核查，未见王无论是否异常都进入关注。每次筛查是一个ScreeningRun批次：分值、参考依据与蜂群状态全部算完后在一个事务里一起发布，发布前逐箱落定不可见、不能据以安排处置。计算期间仍可登记新巡检；发布时若任一参与蜂箱已有更新读数，整次作废并在批次上指出变动箱，作废分值只留在批次记录里，不写入Visit、不用于安排处置，已建立的处置保留原依据。批次状态分为待算/执行/作废/完成/失败原因，页面可查并可从原次重试；入队前失联或算完未发布中断，worker恢复扫描会补投并续算原次，已完成批次拒绝重复发布，并发接管时迟回的旧执行不能改写接管结果。
 - **处置复查簿**：CareAction关联Visit，饲喂或换王。饲喂量0–3kg，饲喂须>0，换王饲喂量记0。planned→executed→rechecked→closed；执行与复查是独立动作。换王执行必须确认新王实际入箱，立即更新Hive.queen_present；复查如果仍无王会真实把Hive置false，主管拒绝关闭，需重新复查。
 
 无王巡检误做饲喂后，复查将CareAction/Visit/Hive分别转needs_requeen，主管不能仅靠饲喂关闭；可据同一Visit新增换王处置，保留原饲喂记录，不覆盖历史。最终关闭须见王、体重不低于巡检、蜂量≥5框；关闭后CareAction=closed、Visit=closed、Hive=winter_ready，旧巡检变stale。已关闭处置不能改执行或复查。
@@ -40,7 +40,7 @@ docker compose up -d --build --wait
 
 数据可复现：Python random.Random(42)，i=0…99。i在[30,46,61,74,88]时四特征分别uniform(15.5,19)、uniform(25,29)、uniform(4,14)、uniform(.1,.5)；其余uniform(25,34)、uniform(32,35)、uniform(38,86)、uniform(1.5,3.8)。体重/箱温/余饲保留2位，活动1位。参考SHA写入每次Visit.model_evidence。读数为模拟范围数据，不接真实蜂箱传感器。
 
-Redis队列交Python worker真算，结果写Visit并在共享artifacts卷留JSON；任务结果Redis缓存24小时。UI不声称患病概率、准确率或临床结论。异常筛查不能代替蜂师检查。
+Redis队列只承担批次派发，ScreeningRun行持久化快照、暂存分值与终态；worker认领（attempt栅栏）→整批暂存→单事务发布，重启由恢复扫描续跑原次，终态在共享artifacts卷留JSON。UI不声称患病概率、准确率或临床结论。异常筛查不能代替蜂师检查。
 
 ## 一天剧本
 
@@ -59,9 +59,9 @@ Seed按email、Hive.code、Visit.code及饲料批号自然键只补缺少记录�
 
 Python3.12 / FastAPI / SQLAlchemy / PostgreSQL16 / Redis7 / scikit-learn1.6 / Nginx1.27；前端原生ES modules / HTML / CSS，无框架。
 
-backend/src/models.py定义Hive/Visit/CareAction与账号审计；schemas.py校验输入；yard_service.py处理箱况/巡检/筛查入队；care_service.py负责执行/复查/关闭与跨实体规则；screen_model.py无监督模型；worker.py消费筛查队列与心跳；app.py接口、JWT依赖、timings/recover两中间件；scripts/seed_demo.py幂等seed。
+backend/src/models.py定义Hive/Visit/CareAction/ScreeningRun与账号审计；schemas.py校验输入；yard_service.py处理箱况/巡检/筛查批次入队与原次重试；care_service.py负责执行/复查/关闭与跨实体规则；screen_model.py无监督模型；worker.py消费筛查队列、批次认领/暂存/原子发布与恢复扫描心跳；app.py接口、JWT依赖、timings/recover两中间件；scripts/seed_demo.py幂等seed。
 
-frontend/src/pages/yard.js箱位、visits.js巡箱、screening.js分值与阈值、care.js处置复查；notebook.js是领域状态与最新巡检选择；api.js请求；utils.js转义/数值/上海时间/错误反馈；components/notes.js共享巡检证据、异常依据、标题和状态。巡检证据在箱位与处置页复用，异常依据在筛查与处置关联显示。
+frontend/src/pages/yard.js箱位、visits.js巡箱、screening.js分值、阈值与批次、care.js处置复查；notebook.js是领域状态与最新巡检选择；api.js请求；utils.js转义/数值/上海时间/错误反馈；components/notes.js共享巡检证据、异常依据、标题和状态。巡检证据在箱位与处置页复用，异常依据在筛查与处置关联显示。
 
 共享角色、CareKind、CareState、VisitState枚举分别在backend/src/constants.py、frontend/src/constants.js；role与账号一致。审计记录真实操作账号、动作、时间，UI按Asia/Shanghai显示。
 

@@ -1,4 +1,4 @@
-import os,json,time,logging
+import os,time,logging
 from contextlib import asynccontextmanager
 import redis
 from sqlalchemy import select,text
@@ -7,10 +7,10 @@ from fastapi import FastAPI,Depends,HTTPException,Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .database import Base,engine,session
-from .models import User,Hive,Visit,CareAction,Audit
+from .models import User,Hive,Visit,CareAction,Audit,ScreeningRun
 from .schemas import Login,HiveInput,VisitInput,CareInput,ExecutionInput,FollowupInput
 from .auth import current,editor,admin,hash_password,issue
-from .yard_service import save_hive,record_visit,enqueue_screen,require
+from .yard_service import save_hive,record_visit,enqueue_screen,retry_screen,run_payload,require
 from . import care_service
 from .screen_model import reference_model
 from .resource_routes import router as resources
@@ -61,10 +61,15 @@ def screen_one(key:int,user=Depends(editor),db=Depends(session)):return enqueue_
 @app.post('/screening')
 def screen_yard(user=Depends(editor),db=Depends(session)):return enqueue_screen(db,user,queue)
 @app.get('/screening/{jobid}')
-def screening_result(jobid:str,user=Depends(current)):
-    result=queue.get('apiary:screen:'+jobid)
-    if not result:raise HTTPException(404,'筛查结果已过期，请重新筛查')
-    return json.loads(result)
+def screening_result(jobid:str,user=Depends(current),db=Depends(session)):
+    run=db.scalar(select(ScreeningRun).where(ScreeningRun.job_id==jobid))
+    if not run:raise HTTPException(404,'筛查批次不存在')
+    return run_payload(run)
+@app.get('/screening-runs')
+def screening_runs(user=Depends(current),db=Depends(session)):
+    return [run_payload(r) for r in db.scalars(select(ScreeningRun).order_by(ScreeningRun.id.desc()).limit(50)).all()]
+@app.post('/screening-runs/{jobid}/retry')
+def screening_retry(jobid:str,user=Depends(editor),db=Depends(session)):return retry_screen(db,user,queue,jobid)
 @app.get('/winter-reference')
 def reference(user=Depends(current)):return reference_model()[1]
 @app.get('/care')
